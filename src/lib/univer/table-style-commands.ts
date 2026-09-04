@@ -372,110 +372,6 @@ export const SetTableCellBorderCommand: ICommand<ISetTableCellBorderParams> = {
 };
 
 // ---------------------------------------------------------------------------
-// View gridlines
-// ---------------------------------------------------------------------------
-
-// Word's View Gridlines draws faint dashed lines wherever a table has no
-// border, so a borderless table is still editable instead of invisible.
-// Univer has no non-printing overlay layer to hang real gridlines off — the
-// renderer only paints borders it finds on cells — so these are ordinary
-// borders in a style reserved for the purpose.
-//
-// Reserving the style is also what removes them: any side still carrying
-// exactly this style is a gridline, so toggling off needs no record of what
-// was painted, and undo/redo can't desync that record. The trade-off is
-// that a border set to exactly this style by hand reads as a gridline.
-// Word can't express that case at all, since its gridlines aren't borders.
-const GRIDLINE_COLOR = "#D0D0D0";
-const GRIDLINE_WIDTH = 1;
-
-const GRIDLINE_BORDER = {
-  color: { rgb: GRIDLINE_COLOR },
-  width: { v: GRIDLINE_WIDTH },
-  dashStyle: DashStyleType.DASH,
-};
-
-// Same shape SetTableCellBorderCommand clears to, and for the same reason:
-// a cell with no border property at all gets the renderer's default grey
-// line back, so "off" has to be an explicit invisible border.
-const CLEARED_BORDER = {
-  color: { rgb: "transparent" },
-  width: { v: 0 },
-  dashStyle: DashStyleType.SOLID,
-};
-
-const GRIDLINE_SIDES: BorderSide[] = ["Top", "Bottom", "Left", "Right"];
-
-type StoredBorder = { color?: IColorStyle; width?: { v?: number }; dashStyle?: DashStyleType };
-
-/** Nothing visible on this side: absent, transparent, or zero-width. */
-function isBorderInvisible(border: unknown): boolean {
-  if (!border) return true;
-  const { color, width } = border as StoredBorder;
-  const rgb = color?.rgb;
-  if (!rgb || rgb.toLowerCase() === "transparent") return true;
-  return !width?.v;
-}
-
-function isGridline(border: unknown): boolean {
-  if (!border) return false;
-  const { color, width, dashStyle } = border as StoredBorder;
-  return (
-    (color?.rgb ?? "").toLowerCase() === GRIDLINE_COLOR.toLowerCase() &&
-    width?.v === GRIDLINE_WIDTH &&
-    dashStyle === DashStyleType.DASH
-  );
-}
-
-export interface IToggleTableGridlinesParams {
-  visible: boolean;
-  range?: SelectedTableRange | null;
-}
-
-export const ToggleTableGridlinesCommandId = "dockaro.command.table-gridlines";
-
-export const ToggleTableGridlinesCommand: ICommand<IToggleTableGridlinesParams> = {
-  id: ToggleTableGridlinesCommandId,
-  type: CommandType.COMMAND,
-  handler: (accessor, params) => {
-    if (!params) return false;
-    const range = resolveTableRange(accessor, params.range);
-    if (!range) return false;
-    const found = getDocAndTable(accessor, range.tableId);
-    if (!found) return false;
-    const { docDataModel, table } = found;
-
-    const jsonX = JSONX.getInstance();
-    const rawActions: JSONXActions[] = [];
-
-    // Gridlines cover the whole table, not the selected cells: this is a
-    // view toggle, not a formatting brush.
-    table.tableRows.forEach((row, r) => {
-      row.tableCells.forEach((cell, c) => {
-        for (const side of GRIDLINE_SIDES) {
-          const key = `border${side}` as const;
-          const current = (cell as Record<string, unknown>)[key];
-
-          // Showing never touches a real border, and hiding only touches
-          // the reserved style — anything else is the user's formatting.
-          if (params.visible ? !isBorderInvisible(current) : !isGridline(current)) continue;
-
-          setProperty(
-            jsonX,
-            rawActions,
-            ["tableSource", range.tableId, "tableRows", r, "tableCells", c, key],
-            current,
-            params.visible ? GRIDLINE_BORDER : CLEARED_BORDER,
-          );
-        }
-      });
-    });
-
-    return runMutation(accessor, docDataModel, rawActions);
-  },
-};
-
-// ---------------------------------------------------------------------------
 // Cell vertical alignment
 // ---------------------------------------------------------------------------
 
@@ -582,25 +478,7 @@ export const SetTableCellMarginCommand: ICommand<ISetTableCellMarginParams> = {
 // Row height
 // ---------------------------------------------------------------------------
 
-/** Univer's default cell padding, used when a table sets none of its own. */
-const DEFAULT_ROW_CELL_MARGIN = { start: 10, end: 10, top: 5, bottom: 5 };
-
-/**
- * A conservative height for one line of text at the editor's default font
- * size, used to decide how much vertical padding a requested row height can
- * still afford. Deliberately an estimate: it only decides how much padding to
- * trim, and the AT_LEAST rule below guarantees the row still grows to fit its
- * real text — so guessing low costs a little padding and guessing high never
- * clips anything.
- */
-const APPROX_LINE_HEIGHT = 20;
-
 export interface ISetTableRowHeightParams {
-  /**
-   * `"fixed"` is Word's "At least": the typed height is a floor, so the row
-   * never crops its text. Reaching a *smaller* height is handled by trimming
-   * the cells' vertical padding instead — see the command below.
-   */
   mode: "auto" | "fixed";
   height?: number;
   range?: SelectedTableRange | null;
@@ -622,35 +500,17 @@ export const SetTableRowHeightCommand: ICommand<ISetTableRowHeightParams> = {
     const jsonX = JSONX.getInstance();
     const rawActions: JSONXActions[] = [];
 
-    // AT_LEAST, never EXACT. The renderer derives a row's content height as
-    // `cell.height + marginTop + marginBottom` and then applies the rule:
-    // AT_LEAST is `Math.max(contentHeight, val.v)`, so the row always fits its
-    // text, while EXACT is a flat `rowHeight = val.v` that crops whatever
-    // doesn't fit — EXACT is why text was being cut off.
-    //
-    // AT_LEAST alone can't shrink a row, though: the vertical cell padding is
-    // part of contentHeight, so with the default 5px top + 5px bottom a
-    // single-line row never drops below roughly 30px however small a height is
-    // asked for — which is why decreasing appeared to do nothing.
-    //
-    // So the padding is trimmed to fit the requested height as well. That
-    // lowers contentHeight, letting AT_LEAST actually reach a shorter row,
-    // and because the rule is still AT_LEAST the text is never clipped.
-    const isAuto = params.mode === "auto";
-    const requestedHeight = Math.max(MIN_ROW_HEIGHT, params.height ?? 30);
-    const newTrHeight = isAuto
-      ? { val: { v: 30 }, hRule: TableRowHeightRule.AUTO }
-      : { val: { v: requestedHeight }, hRule: TableRowHeightRule.AT_LEAST };
-
-    // What the requested height can spare for padding once a line of text has
-    // taken its share. Padding is only ever reduced, so growing a row leaves
-    // the user's own cell margins alone.
-    const paddingRoom = Math.max(0, Math.floor((requestedHeight - APPROX_LINE_HEIGHT) / 2));
+    const newTrHeight =
+      params.mode === "auto"
+        ? { val: { v: 30 }, hRule: TableRowHeightRule.AUTO }
+        // AT_LEAST: row can still grow beyond the chosen height when content
+        // overflows, matching Word's default "At least" behavior. EXACT would
+        // clip text that is taller than the specified value.
+        : { val: { v: params.height ?? 30 }, hRule: TableRowHeightRule.AT_LEAST };
 
     for (let r = range.startRow; r <= range.endRow; r++) {
       const row = table.tableRows[r];
       if (!row) continue;
-
       setProperty(
         jsonX,
         rawActions,
@@ -658,28 +518,6 @@ export const SetTableRowHeightCommand: ICommand<ISetTableRowHeightParams> = {
         row.trHeight,
         newTrHeight,
       );
-
-      // AutoFit means "grow with the content", so it keeps the full padding.
-      if (isAuto) continue;
-
-      row.tableCells.forEach((cell, c) => {
-        const current = cell.margin ?? table.cellMargin;
-        const start = current?.start?.v ?? DEFAULT_ROW_CELL_MARGIN.start;
-        const end = current?.end?.v ?? DEFAULT_ROW_CELL_MARGIN.end;
-        const top = current?.top?.v ?? DEFAULT_ROW_CELL_MARGIN.top;
-        const bottom = current?.bottom?.v ?? DEFAULT_ROW_CELL_MARGIN.bottom;
-        const newTop = Math.min(top, paddingRoom);
-        const newBottom = Math.min(bottom, paddingRoom);
-        if (newTop === top && newBottom === bottom) return;
-
-        setProperty(
-          jsonX,
-          rawActions,
-          ["tableSource", range.tableId, "tableRows", r, "tableCells", c, "margin"],
-          cell.margin,
-          { start: { v: start }, end: { v: end }, top: { v: newTop }, bottom: { v: newBottom } },
-        );
-      });
     }
 
     return runMutation(accessor, docDataModel, rawActions);
@@ -1362,7 +1200,6 @@ export const ALL_TABLE_STYLE_COMMANDS: ICommand[] = [
   ResizeTableRowCommand,
   SetTableCellBackgroundCommand,
   SetTableCellBorderCommand,
-  ToggleTableGridlinesCommand,
   SetTableCellVAlignCommand,
   SetTableCellAlignCommand,
   SetTableRowHeightCommand,

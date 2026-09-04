@@ -23,20 +23,6 @@ export function getBorderPen(): BorderPen {
   return pen;
 }
 
-/**
- * Arm the pen and read it back in one step, for the colour and thickness
- * entries that live inside the Borders dropdown: those have to both remember
- * the choice (so the separate Pen color / Line weight buttons stay in sync)
- * and draw with it immediately, but a dropdown entry only gets to dispatch
- * one command. Setting the pen here lets that single dispatch be the draw.
- */
-export function armBorderPen(patch: ISetBorderPenParams): BorderPen {
-  if (typeof patch.width === "number") pen.width = patch.width;
-  if (typeof patch.color === "string") pen.color = patch.color;
-  if (typeof patch.dashStyle === "number") pen.dashStyle = patch.dashStyle;
-  return pen;
-}
-
 export interface ISetBorderPenParams {
   width?: number;
   color?: string;
@@ -50,7 +36,9 @@ export const SetBorderPenCommand: ICommand<ISetBorderPenParams> = {
   type: CommandType.OPERATION,
   handler: (_accessor, params) => {
     if (!params) return false;
-    armBorderPen(params);
+    if (typeof params.width === "number") pen.width = params.width;
+    if (typeof params.color === "string") pen.color = params.color;
+    if (typeof params.dashStyle === "number") pen.dashStyle = params.dashStyle;
     return true;
   },
 };

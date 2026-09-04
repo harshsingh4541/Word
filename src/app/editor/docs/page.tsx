@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import dynamic from "next/dynamic";
-import { CloudOff } from "lucide-react";
+import { Cloud } from "lucide-react";
 import EditorTopBar from "@/components/editors/EditorTopBar";
 import DocumentTitle from "@/components/editors/DocumentTitle";
 import WordStatusBar from "@/components/editors/WordStatusBar";
@@ -41,11 +41,8 @@ export default function DocsEditorPage() {
         active="docs"
         center={<DocumentTitle name={status.name} onRename={(name) => apiRef.current?.setName(name)} />}
         right={
-          <span
-            className="flex items-center gap-1.5 rounded px-2 py-1 text-xs text-word-muted"
-            title="This document isn't kept — refreshing starts a new one. Download it to keep a copy."
-          >
-            <CloudOff size={13} /> Not saved
+          <span className="flex items-center gap-1.5 rounded px-2 py-1 text-xs text-word-muted" title="Saved in this browser">
+            <Cloud size={13} /> Saved
           </span>
         }
       />

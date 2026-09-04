@@ -1,4 +1,4 @@
-import { DashStyleType, UniverInstanceType } from "@univerjs/core";
+import { DashStyleType, IContextService, UniverInstanceType } from "@univerjs/core";
 import type { IAccessor, IDisposable, Injector } from "@univerjs/core";
 import {
   COLOR_PICKER_COMPONENT,
@@ -17,10 +17,10 @@ import {
 import type { IMenuButtonItem, IMenuSelectorItem, IValueOption, MenuSchemaType } from "@univerjs/ui";
 import TableGridPicker, { parseTableSize } from "@/components/editors/TableGridPicker";
 import TableSizeField from "@/components/editors/TableSizeField";
-import BorderPicker, { parseBorderChoice } from "@/components/editors/BorderPicker";
 import { whenDocAndEditorFocused } from "@univerjs/docs-ui";
 import {
   DocSelectAllCommand,
+  DocTableTabCommand,
   AlignCenterCommand,
   AlignJustifyCommand,
   AlignLeftCommand,
@@ -79,13 +79,7 @@ import {
   SetZoomCommandId,
   PX_PER_INCH,
 } from "./word-commands";
-import {
-  BORDER_WEIGHTS,
-  SetBorderPenCommandId,
-  armBorderPen,
-  getBorderPen,
-  pointsToPixels,
-} from "./border-pen";
+import { BORDER_WEIGHTS, SetBorderPenCommandId, getBorderPen, pointsToPixels } from "./border-pen";
 import { ToggleSpellCheckCommandId } from "./spell-check";
 import { SetWatermarkCommandId } from "./watermark";
 import { ResolveTrackedChangesCommandId, ToggleTrackChangesCommandId } from "./track-changes";
@@ -110,8 +104,11 @@ import {
   SetTableLayoutCommandId,
   SetTableRowHeightCommandId,
   SplitTableCellsCommandId,
-  ToggleTableGridlinesCommandId,
+  type BorderSide,
 } from "./table-style-commands";
+
+/** Context key set by DocsEditor when the cursor is inside a table. */
+export const WORD_CURSOR_IN_TABLE_CTX = "dockaro.ctx.cursorInTable";
 
 // Word's ribbon, built out of Univer's own ribbon machinery rather than a
 // second toolbar bolted on next to it. Univer's `grid` ribbon already has
@@ -149,9 +146,6 @@ const WORD_GROUP = {
 const TABLE_GRID_PICKER_COMPONENT = "dockaro.component.table-grid-picker";
 /** Registered component id for Word's row height / column width box. */
 const TABLE_SIZE_FIELD_COMPONENT = "dockaro.component.table-size-field";
-
-/** Registered component id for the weight + colour + sides border panel. */
-const BORDER_PICKER_COMPONENT = "dockaro.component.border-picker";
 
 const COMMENT_PANEL_COMMAND_ID = "docs.operation.toggle-comment-panel";
 const ADD_COMMENT_COMMAND_ID = "docs.operation.start-add-comment";
@@ -273,9 +267,6 @@ export const WORD_UI_LOCALE = {
       shading: "Shading",
       shadingClear: "No shading",
       borders: "Borders",
-      gridlines: "View gridlines",
-      gridlinesShow: "Show gridlines",
-      gridlinesHide: "Hide gridlines",
       borderColor: "Pen color",
       borderStyle: "Line style",
       borderWeight: "Line weight",
@@ -399,12 +390,29 @@ function option(label: string, params: Record<string, unknown>, icon?: string): 
   return { label, value: label, icon, params: () => params };
 }
 
+/**
+ * A Borders entry. Like Word, it draws with whatever the pen is set to at
+ * the moment it is clicked rather than a fixed colour and weight.
+ */
+function borderOption(label: string, sides: BorderSide[], icon: string): IValueOption {
+  return {
+    label,
+    value: label,
+    icon,
+    params: () => {
+      const pen = getBorderPen();
+      return { sides, color: pen.color, width: pen.width, dashStyle: pen.dashStyle };
+    },
+  };
+}
+
 const LINE_SPACINGS = [1, 1.15, 1.5, 2, 2.5, 3];
 const ZOOM_LEVELS = [50, 75, 100, 125, 150, 200];
 const ROW_HEIGHTS = [24, 32, 40, 48, 64];
 const COLUMN_WIDTHS = [80, 100, 120, 160, 200];
 /** Word's own "space before/after paragraph" presets, in points. */
 const PARAGRAPH_SPACES = [0, 6, 12, 18];
+const ALL_BORDER_SIDES: BorderSide[] = ["Top", "Bottom", "Left", "Right"];
 
 const CELL_ALIGNMENTS: { label: string; icon: string; horizontal: number; vertical: number }[] = [
   // HorizontalAlign LEFT/CENTER/RIGHT = 1/2/3, VerticalAlignmentType TOP/CENTER/BOTTOM = 2/3/4.
@@ -957,29 +965,17 @@ function buildRootMenuOverrides(): MenuSchemaType {
                 id: SetTableCellBorderCommandId,
                 icon: "AllBorderIcon",
                 title: "dockaro.table.borders",
-                // One panel instead of a flat list: weight and colour are
-                // chosen in place, and the side button applies all three in
-                // the single dispatch a dropdown entry is allowed.
                 selections: [
-                  {
-                    label: {
-                      name: BORDER_PICKER_COMPONENT,
-                      hoverable: false,
-                      selectable: false,
-                      props: {
-                        initialWidth: getBorderPen().width,
-                        initialColor: getBorderPen().color,
-                      },
-                    },
-                    params: (value?: string | number) => {
-                      const choice = parseBorderChoice(value);
-                      if (!choice) return undefined;
-                      // Keep the standalone Pen color / Line weight buttons
-                      // showing what was drawn, so the two stay one pen.
-                      if (choice.color) armBorderPen({ width: choice.width, color: choice.color });
-                      return { ...choice, dashStyle: getBorderPen().dashStyle };
-                    },
-                  },
+                  borderOption("dockaro.table.bordersAll", ALL_BORDER_SIDES, "AllBorderIcon"),
+                  borderOption("dockaro.table.borderTop", ["Top"], "UpBorderDoubleIcon"),
+                  borderOption("dockaro.table.borderBottom", ["Bottom"], "DownBorderDoubleIcon"),
+                  borderOption("dockaro.table.borderLeft", ["Left"], "LeftBorderDoubleIcon"),
+                  borderOption("dockaro.table.borderRight", ["Right"], "RightBorderDoubleIcon"),
+                  option(
+                    "dockaro.table.bordersNone",
+                    { sides: ALL_BORDER_SIDES, color: null, width: 1 },
+                    "NoBorderIcon",
+                  ),
                 ],
               }),
           },
@@ -1031,24 +1027,6 @@ function buildRootMenuOverrides(): MenuSchemaType {
               ],
               hidden$: getMenuHiddenObservable(accessor, UniverInstanceType.UNIVER_DOC),
             }),
-          },
-          [ToggleTableGridlinesCommandId]: {
-            order: 4,
-            gridLayout: { row: 1, column: 5, rowSpan: 2, showLabel: true },
-            // Word's is a single on/off button that reflects its own state.
-            // Nothing here can read gridline state back out of the document
-            // cheaply, so both choices are spelled out instead of leaving
-            // the user to guess which way a blind toggle will go.
-            menuItemFactory: (accessor: IAccessor) =>
-              selector(accessor, {
-                id: ToggleTableGridlinesCommandId,
-                icon: "GridIcon",
-                title: "dockaro.table.gridlines",
-                selections: [
-                  option("dockaro.table.gridlinesShow", { visible: true }),
-                  option("dockaro.table.gridlinesHide", { visible: false }),
-                ],
-              }),
           },
         },
 
@@ -1273,6 +1251,12 @@ export function installWordRibbon(injector: Injector): WordRibbon {
       groupTitle: "ui.global-shortcut",
       ...extra,
     });
+  // Precondition: cursor is inside a table (for Tab navigation shortcuts).
+  // The context key is set by DocsEditor whenever the selection changes.
+  const isInTable = (contextService: IContextService): boolean =>
+    whenDocAndEditorFocused(contextService) &&
+    (contextService.getContextValue(WORD_CURSOR_IN_TABLE_CTX) ?? false);
+
   const shortcutDisposables = [
     // Word's Ctrl+Enter inserts a page break; Univer binds nothing to it.
     wordShortcut(InsertPageBreakCommandId, KeyCode.ENTER | MetaKeys.CTRL_COMMAND, "dockaro.layout.pageBreak"),
@@ -1290,10 +1274,33 @@ export function installWordRibbon(injector: Injector): WordRibbon {
       staticParameters: { wholeDocument: true },
       priority: 100,
     }),
+    // Tab / Shift+Tab move the cursor between table cells, exactly as Word
+    // does. Priority 200 ensures these beat any other Tab binding while the
+    // cursor is inside a table. Outside a table the precondition is false and
+    // the key reaches Univer's default handler unchanged.
+    shortcutService.registerShortcut({
+      id: DocTableTabCommand.id,
+      binding: KeyCode.TAB,
+      preconditions: isInTable,
+      staticParameters: { shift: false },
+      description: "dockaro.table.tab",
+      group: "10_global-shortcut",
+      groupTitle: "ui.global-shortcut",
+      priority: 200,
+    }),
+    shortcutService.registerShortcut({
+      id: DocTableTabCommand.id,
+      binding: KeyCode.TAB | MetaKeys.SHIFT,
+      preconditions: isInTable,
+      staticParameters: { shift: true },
+      description: "dockaro.table.tabBack",
+      group: "10_global-shortcut",
+      groupTitle: "ui.global-shortcut",
+      priority: 200,
+    }),
   ];
   const componentDisposable = componentManager.register(TABLE_GRID_PICKER_COMPONENT, TableGridPicker);
   const sizeFieldDisposable = componentManager.register(TABLE_SIZE_FIELD_COMPONENT, TableSizeField);
-  const borderPickerDisposable = componentManager.register(BORDER_PICKER_COMPONENT, BorderPicker);
   menuManagerService.appendRootMenu(buildRootMenuOverrides());
   menuManagerService.mergeMenu(buildWordMenuSchema());
 
@@ -1312,7 +1319,6 @@ export function installWordRibbon(injector: Injector): WordRibbon {
       ribbonService.hideAllContextualTabs();
       componentDisposable.dispose();
       sizeFieldDisposable.dispose();
-      borderPickerDisposable.dispose();
       for (const disposable of shortcutDisposables) disposable.dispose();
       iconDisposable.dispose();
     },
